@@ -1,0 +1,164 @@
+#load data and the respective embeddings 
+dataset = pd.read_csv('gpt4.csv') # original data that include similarity scores
+
+df_d = pd.read_csv('studentembeddings-gpt35.csv') 
+df_a = pd.read_csv('studentembeddings-gpt4-canonical.csv') #gpt-4 canonical 
+df_s = pd.read_csv('studentembeddings-gpt4-simplification.csv') #gpt-4 simplification
+df_c = pd.read_csv('studentembeddings-gpt4-combination.csv') #gpt-4 combination
+
+initial_train = dataset.iloc[[0,1,2,3,4],:] #take the first five data for initial phase
+
+Z = df_s.iloc[train_index,:] #unlabeled pool samples of student answers' embedding
+S = pd.DataFrame(columns=Z.columns) #empty pool to stores selected student answers
+
+#selecting data with FAISS
+import faiss
+%%time 
+S_np = np.ascontiguousarray(S.values.astype('float32'))
+Z_np = np.ascontiguousarray(Z.values.astype('float32'))
+
+faiss.normalize_L2(S_np)
+faiss.normalize_L2(Z_np)
+
+index = faiss.IndexFlatIP(S_np.shape[1]) 
+index.add(S_np)
+
+original_indices_S = list(S.index)
+original_indices_Z = list(Z.index)
+
+R = []  # List to store the original indices of selected points from Z
+
+for k in range(1, 93):  # iterate to choose data
+    max_sim = -1  
+    mx = 0  
+
+    for n in range(Z_np.shape[0]):
+        b = Z_np[n:n+1]  
+
+        # Search for the nearest neighbors in S
+        D, I = index.search(b, k)  
+        min_sim = D.min()  
+        if min_sim > max_sim:
+            max_sim = min_sim
+            mx = n
+
+    # Append the selected point from Z to S
+    selected_point = Z_np[mx:mx+1]
+    S_np = np.vstack([S_np, selected_point])
+
+    # Add the selected point to the FAISS index
+    index.add(selected_point)
+
+    # Remove the selected point from Z
+    Z_np = np.delete(Z_np, mx, axis=0)
+    
+    # Store the original index of the selected point
+    R.append(original_indices_Z[mx])
+
+    # Update original indices tracking
+    original_indices_S.append(original_indices_Z[mx])
+    original_indices_Z.pop(mx)
+
+# Convert the resulting S_np back to a DataFrame if needed
+S = pd.DataFrame(S_np)
+
+%%time
+# AGE 
+x_train = initial_train['normalized_gpt35_score']
+y_train = initial_train['score_avg']
+
+unlabel1 = df1['normalized_gpt35_score']
+unlabel2 = df2['similarity_score']
+unlabel3 = df3['similarity_score']
+unlabel4 = df4['similarity_score']
+label1 = dataset['score_me']
+label2 = dataset['score_other']
+label3 = dataset['score_avg']
+
+x_test = test_data['normalized_gpt35_score']
+y_test1 = test_data['score_me']
+y_test2 = test_data['score_other']
+y_test3 = test_data['score_avg']
+
+
+indices = label1.index
+num_classes = len(set(label1))
+best_dev_mae = 0.0
+index_in_labels_pool = []
+index_in_unlabeled_pool = indices
+index_of_new_add_index = []
+index_in_labels_pool += list(index_in_unlabeled_pool[index_of_new_add_index])
+index_in_unlabeled_pool = np.delete(index_in_unlabeled_pool, index_of_new_add_index)
+
+mae_list = []
+rmse_list = []
+inference_times = [] 
+canonical_count = 0
+simplify_count = 0
+combine_count = 0
+cur_labels = y_train
+cur_train = x_train
+Px1 = unlabel1
+Px2 = unlabel2
+Px3 = unlabel3
+Py_other = label2
+Py_me = label1
+Py_avg = label3
+
+eps = 1e-8
+
+for i in range(100):
+    classifier = SVR()
+    classifier.fit(x_train.values.reshape(-1,1), y_train) # train model with labeled pool using score_other label
+    y_probab = classifier.predict(Px1.values.reshape(-1,1)) # predict data in P using score_other label
+    mae = mean_absolute_error(y_probab, Py_avg) # calculate MAE using score_other label
+        
+    index_of_new_add_index = selected[:1] 
+    index_in_labels_pool += list(index_of_new_add_index)
+    # Select unlabel value based on similarity score between unlabel1 and unlabel2
+    similarity_score_1 = df1.loc[index_of_new_add_index, 'normalized_gpt35_score'].item()
+    similarity_score_2 = df2.loc[index_of_new_add_index, 'similarity_score'].item()
+    similarity_score_3 = df3.loc[index_of_new_add_index, 'similarity_score'].item()
+    similarity_score_4 = df4.loc[index_of_new_add_index, 'similarity_score'].item()
+    if similarity_score_1 > similarity_score_2 and similarity_score_1 > similarity_score_3 and similarity_score_1 > similarity_score_4:
+        selected_x = unlabel1.loc[index_of_new_add_index]
+    elif similarity_score_2 > similarity_score_1 and similarity_score_2 > similarity_score_3 and similarity_score_2 > similarity_score_4:
+        selected_x = unlabel2.loc[index_of_new_add_index]
+        canonical_count += 1
+    elif similarity_score_3 > similarity_score_1 and similarity_score_3 > similarity_score_2 and similarity_score_3 > similarity_score_4:
+        selected_x = unlabel3.loc[index_of_new_add_index]
+        simplify_count += 1
+    else:
+        selected_x = unlabel4.loc[index_of_new_add_index]
+        combine_count += 1
+        
+    if len(selected) > 1:
+        selected = np.delete(selected,0)
+
+    #major voting
+    pred_score = classifier.predict(x_test.values.reshape(-1,1))
+    true_score1 = Py_me.loc[index_of_new_add_index]
+    true_score2 = Py_other.loc[index_of_new_add_index]
+    mae_me = mean_absolute_error(y_probab, Py_me) # calculate MAE using score_me label
+    mae_other = mean_absolute_error(y_probab, Py_other) # calculate MAE using score_other label
+    if mae_other < mae_me:
+        selected_label = 'score_other'
+        mae = mae_other
+    else:
+        selected_label = 'score_me'
+        mae = mae_me
+    selected_y = Py_other[index_of_new_add_index] if selected_label == 'score_other' else Py_me[index_of_new_add_index]
+    Px = Px.drop(index_of_new_add_index).reset_index(drop=True)
+    Py_other = Py_other.drop(index_of_new_add_index).reset_index(drop=True)
+    Py_me = Py_me.drop(index_of_new_add_index).reset_index(drop=True)
+    Py_avg = Py_avg.drop(index_of_new_add_index).reset_index(drop=True)
+    
+    x_train = x_train.append(selected_x)
+    y_train = y_train.append(selected_y)
+    classifier = SVR()
+    classifier.fit(x_train.values.reshape(-1,1), y_train)
+    score = classifier.predict(x_test.values.reshape(-1,1)) #evaluate on test data 
+   
+    print(mae)
+    print(index_in_labels_pool)
+    mae_list.append(mae)
